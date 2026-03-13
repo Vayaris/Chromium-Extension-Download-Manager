@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Download Manager</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <header>
+    <div class="header-left">
+      <img src="../icons/icon48.png" alt="" class="logo" />
+      <span class="app-name">Download Manager</span>
+    </div>
+    <button id="openDMBtn" class="icon-btn" title="Ouvrir Download Manager">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M11 3h6v6M17 3l-8 8M8 5H4a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1v-4"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- Status bar -->
+  <div class="status-bar" id="statusBar">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">Non configuré</span>
+  </div>
+
+  <!-- ── ÉTAPE 1 : Identifiants ────────────────────────────── -->
+  <div id="stepCredentials">
+    <form id="loginForm">
+      <div class="field">
+        <label for="serverUrl">URL du serveur</label>
+        <input type="url" id="serverUrl" placeholder="http://192.168.1.100:40320" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label for="username">Identifiant</label>
+        <input type="text" id="username" placeholder="admin" autocomplete="username" />
+      </div>
+      <div class="field">
+        <label for="password">Mot de passe</label>
+        <input type="password" id="password" autocomplete="current-password" />
+      </div>
+      <div id="loginError" class="error-msg"></div>
+      <button type="submit" id="loginBtn" class="btn btn-primary">Se connecter</button>
+    </form>
+  </div>
+
+  <!-- ── ÉTAPE 2 : Code 2FA ────────────────────────────────── -->
+  <div id="stepOtp" style="display:none">
+    <div class="otp-panel">
+      <div class="otp-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="5" y="11" width="14" height="10" rx="2"/>
+          <path d="M8 11V7a4 4 0 018 0v4"/>
+          <circle cx="12" cy="16" r="1" fill="currentColor"/>
+        </svg>
+      </div>
+      <p class="otp-title">Vérification en deux étapes</p>
+      <p class="otp-desc">Entrez le code généré par votre application d'authentification.</p>
+      <div class="field">
+        <input
+          type="text"
+          id="otpCode"
+          class="otp-input"
+          placeholder="000000"
+          maxlength="6"
+          inputmode="numeric"
+          pattern="[0-9]{6}"
+          autocomplete="one-time-code"
+        />
+      </div>
+      <div id="otpError" class="error-msg"></div>
+      <button type="button" id="otpSubmitBtn" class="btn btn-primary" disabled>Valider</button>
+      <button type="button" id="otpBackBtn" class="link-btn back-btn">← Retour</button>
+    </div>
+  </div>
+
+  <!-- ── CONNECTÉ ──────────────────────────────────────────── -->
+  <div id="connectedPanel" style="display:none">
+
+    <!-- Destination active -->
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">Destination active</span>
+        <button id="pickDestBtn" class="link-btn">Parcourir…</button>
+      </div>
+      <div class="dest-display">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" class="folder-icon">
+          <path d="M2 6a2 2 0 012-2h3.586a1 1 0 01.707.293L9.5 5.5H16a2 2 0 012 2V15a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>
+        </svg>
+        <span id="destPath" class="dest-path">—</span>
+      </div>
+    </section>
+
+    <!-- Accès rapides -->
+    <section class="section" id="quickPathsSection" style="display:none">
+      <div class="section-title">Accès rapides</div>
+      <div id="quickPaths" class="chips"></div>
+    </section>
+
+    <!-- Mini navigateur de dossiers -->
+    <section class="section" id="browserSection" style="display:none">
+      <div class="section-header">
+        <span class="section-title">Sélectionner un dossier</span>
+        <button id="closeBrowserBtn" class="link-btn">✕</button>
+      </div>
+      <div id="breadcrumb" class="breadcrumb"></div>
+      <div id="folderList" class="folder-list"></div>
+      <div id="browserError" class="error-msg" style="display:none"></div>
+      <div class="browser-actions">
+        <button id="mkdirBtn" class="btn btn-ghost btn-sm">+ Dossier</button>
+        <button id="confirmDestBtn" class="btn btn-primary btn-sm">Confirmer</button>
+      </div>
+    </section>
+
+    <!-- Historique -->
+    <section class="section" id="historySection" style="display:none">
+      <div class="section-title">Derniers envois</div>
+      <div id="historyList" class="history-list"></div>
+    </section>
+
+    <!-- Footer -->
+    <div class="footer-actions">
+      <span id="loggedAs" class="logged-as"></span>
+      <button id="logoutBtn" class="link-btn danger">Déconnexion</button>
+    </div>
+
+  </div>
+
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

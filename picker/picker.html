@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Choisir la destination — Download Manager</title>
+  <link rel="stylesheet" href="picker.css" />
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <header>
+    <div class="header-left">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" class="folder-icon">
+        <path d="M2 6a2 2 0 012-2h3.586a1 1 0 01.707.293L9.5 5.5H16a2 2 0 012 2V15a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>
+      </svg>
+      <span>Choisir la destination</span>
+    </div>
+    <button id="cancelBtn" class="icon-close" title="Annuler">✕</button>
+  </header>
+
+  <!-- Torrent info -->
+  <div id="torrentInfo" class="torrent-info"></div>
+
+  <!-- Breadcrumb -->
+  <div id="breadcrumb" class="breadcrumb"></div>
+
+  <!-- Folder list -->
+  <div id="folderList" class="folder-list"></div>
+
+  <!-- Error -->
+  <div id="errorMsg" class="error-msg"></div>
+
+  <!-- Selected destination bar -->
+  <div class="selected-bar">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" class="fi-sm">
+      <path d="M2 6a2 2 0 012-2h3.586a1 1 0 01.707.293L9.5 5.5H16a2 2 0 012 2V15a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>
+    </svg>
+    <span id="selectedPath" class="selected-path">—</span>
+  </div>
+
+  <!-- Actions -->
+  <div class="actions">
+    <button id="mkdirBtn" class="btn btn-ghost">+ Nouveau dossier</button>
+    <div class="action-right">
+      <button id="cancelBtn2" class="btn btn-ghost">Annuler</button>
+      <button id="sendBtn" class="btn btn-primary" disabled>
+        Envoyer
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" class="send-icon">
+          <path d="M3 10l14 0M13 5l5 5-5 5"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Sending overlay -->
+  <div id="overlay" class="overlay" style="display:none">
+    <div class="overlay-content">
+      <div class="spinner"></div>
+      <p>Envoi en cours…</p>
+    </div>
+  </div>
+
+  <!-- Result overlay -->
+  <div id="resultOverlay" class="overlay" style="display:none">
+    <div class="overlay-content">
+      <div id="resultIcon" class="result-icon"></div>
+      <p id="resultMsg"></p>
+      <button id="closeResultBtn" class="btn btn-primary" style="margin-top:12px">Fermer</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="picker.js"></script>
+</body>
+</html>
