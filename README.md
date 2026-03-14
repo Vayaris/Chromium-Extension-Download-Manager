@@ -2,7 +2,7 @@
 
 Extension Chromium (Manifest V3) conçue pour s'intégrer nativement avec [Download Manager](https://github.com/Vayaris/Download-Manager), une application web auto-hébergée de gestion de téléchargements.
 
-Elle permet d'envoyer des liens **magnet** et des fichiers **.torrent** directement depuis n'importe quel site vers votre instance Download Manager — d'un simple clic droit, sans quitter la page.
+Elle permet d'envoyer des liens **magnet** et des fichiers **.torrent** directement depuis n'importe quel site vers votre instance Download Manager — par simple clic gauche ou clic droit, sans quitter la page, sans que le fichier ne touche jamais votre disque local.
 
 ---
 
@@ -21,14 +21,35 @@ Elle permet d'envoyer des liens **magnet** et des fichiers **.torrent** directem
 
 ## Fonctionnalités
 
+### Interception automatique (clic gauche normal)
+
+- **Clic gauche sur n'importe quel bouton de téléchargement .torrent** → envoyé directement à Download Manager, sans fenêtre de sauvegarde locale
+- Fonctionne même sur les sites où le bouton est un `<button>` JavaScript sans lien direct (ex : sites Next.js/React)
+- Intercepte les téléchargements déclenchés par `fetch()`, `XMLHttpRequest` ou `URL.createObjectURL()` dans la page
+- Annulation automatique du téléchargement Chrome — aucune fenêtre "Enregistrer sous"
+- Toggle dans le popup pour activer ou désactiver cette interception
+
+### Envoi via clic droit
+
 - **Clic droit → Envoyer (dossier par défaut)** : envoi immédiat vers votre destination configurée
-- **Clic droit → Envoyer… (choisir le dossier)** : ouvre un navigateur de dossiers qui liste l'arborescence réelle de votre serveur
-- **Navigateur de dossiers intégré** dans le popup et dans la fenêtre de sélection — navigation via l'API `/api/files/browse` de votre serveur
+- **Clic droit → Envoyer… (choisir le dossier)** : ouvre un navigateur de dossiers avec l'arborescence réelle de votre serveur
+- Prise en charge des **liens magnet**, des **fichiers .torrent directs** et des **liens indirects** (URL opaque qui redirige vers un .torrent côté serveur)
+- Détection robuste : MIME type, Content-Disposition, URL finale, et vérification des **magic bytes** (signature bencoding)
+
+### Interface popup
+
+- **Navigateur de dossiers intégré** — navigation via l'API `/api/files/browse`
 - **Accès rapides** : chips cliquables pour chaque chemin autorisé configuré dans Download Manager
-- **Création de dossier** à la volée depuis l'extension (`+ Nouveau dossier`)
-- **Historique** des 5 derniers envois affichés dans le popup
-- **Authentification complète** : login classique + support du **2FA (TOTP)** avec flow en deux étapes
-- Aucune modification du backend requise
+- **Création de dossier** à la volée (`+ Dossier`)
+- **Historique** des 5 derniers envois
+- **Notification système** à chaque torrent envoyé avec succès
+- Alerte visuelle pour les connexions HTTP non sécurisées
+
+### Authentification
+
+- Login classique + support complet du **2FA / TOTP** (Google Authenticator, Authy…)
+- Persistance du formulaire : les champs URL et identifiant sont sauvegardés en temps réel — compatibles avec les gestionnaires de mots de passe (Bitwarden, etc.)
+- Token JWT conservé localement — reconnexion automatique au démarrage
 
 ---
 
@@ -121,6 +142,34 @@ L'extension gère le 2FA en deux étapes distinctes :
 
 ## Utilisation
 
+### Interception automatique — clic gauche
+
+C'est le mode de fonctionnement principal pour les sites modernes (React, Next.js…) où le bouton de téléchargement est un élément JavaScript sans lien `href` direct.
+
+1. Vérifiez que l'extension est **connectée** (point vert dans le popup)
+2. **Rechargez la page** du site torrent si vous venez d'installer ou de mettre à jour l'extension
+3. Cliquez normalement (clic gauche) sur le bouton "Télécharger le torrent"
+4. → Pas de fenêtre de sauvegarde. Une notification système confirme l'envoi.
+
+> Pour désactiver cette interception (si vous souhaitez occasionnellement télécharger un .torrent localement), décochez **"Intercepter les .torrent"** dans le popup.
+
+### Envoi via clic droit
+
+Pour les liens directs (balise `<a href="...">`) sur les sites classiques :
+
+| Clic droit sur… | Menu disponible |
+|----------------|-----------------|
+| Lien magnet (`magnet:?xt=…`) | Download Manager → Envoyer |
+| Lien `.torrent` direct | Download Manager → Envoyer |
+| Bouton/lien indirect (URL opaque) | Download Manager → Envoyer |
+
+Deux options dans le menu :
+
+| Option | Comportement |
+|--------|-------------|
+| **Envoyer (dossier par défaut)** | Envoi immédiat vers la destination configurée dans le popup |
+| **Envoyer… (choisir le dossier)** | Ouvre une fenêtre avec l'arborescence complète de votre serveur |
+
 ### Changer la destination par défaut
 
 Dans le popup (icône de l'extension) :
@@ -129,24 +178,7 @@ Dans le popup (icône de l'extension) :
 - Cliquez sur **"Parcourir…"** pour ouvrir le navigateur de dossiers intégré et naviguer librement dans l'arborescence de votre serveur
 - Le bouton **"+ Dossier"** crée un nouveau dossier à l'emplacement courant
 
-### Envoyer un lien magnet
-
-Sur n'importe quel site torrent, **faites un clic droit sur le lien magnet** et choisissez :
-
-| Option | Comportement |
-|--------|-------------|
-| **Download Manager → Envoyer (dossier par défaut)** | Envoi immédiat vers la destination configurée dans le popup |
-| **Download Manager → Envoyer… (choisir le dossier)** | Ouvre une fenêtre avec l'arborescence complète de votre serveur |
-
-### Envoyer un fichier .torrent
-
-Même procédure : **clic droit sur le lien `.torrent`** → même menu contextuel.
-
-L'extension télécharge le fichier `.torrent` en mémoire puis le transmet directement à votre serveur via l'API — le fichier ne touche jamais votre disque local.
-
-### Fenêtre de sélection du dossier
-
-Quand vous choisissez **"Envoyer… (choisir le dossier)"**, une fenêtre s'ouvre :
+### Fenêtre de sélection du dossier (clic droit → Envoyer…)
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -165,7 +197,7 @@ Quand vous choisissez **"Envoyer… (choisir le dossier)"**, une fenêtre s'ouvr
 ```
 
 - Naviguez en cliquant sur les dossiers ou les **breadcrumbs**
-- Cliquez sur **"Envoyer"** pour confirmer — une animation de chargement s'affiche puis une confirmation de succès
+- Cliquez sur **"Envoyer"** pour confirmer
 
 ---
 
@@ -198,6 +230,7 @@ Quand vous choisissez **"Envoyer… (choisir le dossier)"**, une fenêtre s'ouvr
 | Destination active | `chrome.storage.local` | Permanent |
 | Chemins autorisés | `chrome.storage.local` | Mis à jour à chaque connexion |
 | Historique des envois | `chrome.storage.local` | 10 dernières entrées |
+| Préférence interception | `chrome.storage.local` | Permanent |
 
 **Votre mot de passe n'est jamais stocké.** Il est utilisé uniquement le temps de la requête de login, puis effacé de la mémoire.
 
@@ -206,7 +239,7 @@ En cas de 2FA, vos identifiants temporaires (utilisés pour la seconde étape) s
 ### Permissions demandées
 
 ```json
-"permissions": ["contextMenus", "storage", "notifications", "windows"]
+"permissions": ["contextMenus", "storage", "notifications", "windows", "scripting", "cookies", "downloads"]
 "host_permissions": ["http://*/*", "https://*/*"]
 ```
 
@@ -216,9 +249,17 @@ En cas de 2FA, vos identifiants temporaires (utilisés pour la seconde étape) s
 | `storage` | Stocker l'URL du serveur, le token et les préférences |
 | `notifications` | Afficher les confirmations d'envoi |
 | `windows` | Ouvrir la fenêtre de sélection de dossier |
-| `host_permissions` *` | Communiquer avec votre serveur Download Manager sur son URL locale |
+| `scripting` | Fallback : exécuter un fetch dans le contexte de la page si nécessaire |
+| `cookies` | Lire les cookies du site pour authentifier les re-fetch de liens indirects |
+| `downloads` | Intercepter et annuler les téléchargements .torrent pour les rediriger vers DM |
+| `host_permissions *` | Communiquer avec votre serveur Download Manager et lire les cookies des sites torrent |
 
-> `host_permissions: *` permet aux service workers MV3 de contacter votre serveur sans contrainte CORS côté navigateur. L'extension ne communique qu'avec l'URL que vous avez configurée.
+### Content scripts
+
+L'extension injecte deux scripts légers sur toutes les pages web :
+
+- **`content-main.js`** (contexte JS de la page) : surveille les réponses réseau pour détecter les fichiers .torrent au moment où la page les reçoit. Ne lit aucune donnée de la page, n'accède à aucun formulaire, n'envoie rien à des tiers.
+- **`content-bridge.js`** (contexte isolé) : relais de messages entre la page et le service worker. Aucune logique métier.
 
 ### Aucune donnée ne quitte votre réseau
 
@@ -231,9 +272,9 @@ L'extension communique **exclusivement** avec l'URL que vous saisissez dans le p
 ```
 chrome-extension/
 ├── manifest.json            # Manifest V3 — déclaration de l'extension
-├── background.js            # Service Worker — menus contextuels + appels API
-├── lib/
-│   └── api.js               # Client API partagé (référence)
+├── background.js            # Service Worker — menus contextuels, interception, appels API
+├── content-main.js          # Content script (MAIN world) — interception fetch/XHR/blob
+├── content-bridge.js        # Content script (ISOLATED) — pont page ↔ service worker
 ├── popup/
 │   ├── popup.html           # Interface principale (connexion, destination, historique)
 │   ├── popup.js             # Logique : login 2 étapes, navigateur de dossiers, OTP
@@ -242,6 +283,8 @@ chrome-extension/
 │   ├── picker.html          # Fenêtre de sélection de dossier
 │   ├── picker.js            # Navigation arborescence + envoi vers l'API
 │   └── picker.css           # Styles de la fenêtre picker
+├── lib/
+│   └── api.js               # Client API partagé (référence)
 └── icons/
     ├── icon16.png
     ├── icon48.png
