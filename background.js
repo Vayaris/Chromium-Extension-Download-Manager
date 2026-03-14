@@ -60,25 +60,25 @@ chrome.runtime.onInstalled.addListener(buildMenus);
 chrome.runtime.onStartup.addListener(buildMenus);
 
 // ── Context menu click handler ────────────────────────────────
-// Le second paramètre `tab` contient l'id de l'onglet où l'utilisateur
-// a fait le clic droit — on en a besoin pour injecter le fetch dans la page.
+// On capture tab.id ET tab.url : le tabId sert pour executeScript,
+// et pageUrl sert comme Referer + pour récupérer les cookies du domaine.
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  const url   = info.linkUrl;
-  const tabId = tab?.id ?? null;
+  const url     = info.linkUrl;
+  const tabId   = tab?.id  ?? null;
+  const pageUrl = tab?.url ?? "";
   if (!url) return;
 
-  // type est une indication initiale ; dispatch() affine si le lien est indirect
   const type = url.startsWith("magnet:") ? "magnet" : "torrent";
 
   if (info.menuItemId === "dm-send-default") {
-    await handleSendDefault(type, url, tabId);
+    await handleSendDefault(type, url, tabId, pageUrl);
   } else if (info.menuItemId === "dm-send-pick") {
-    await openPicker(type, url, tabId);
+    await openPicker(type, url, tabId, pageUrl);
   }
 });
 
 // ── Send to default destination ───────────────────────────────
-async function handleSendDefault(type, url, tabId) {
+async function handleSendDefault(type, url, tabId, pageUrl) {
   const { serverUrl, token } = await getStorage(["serverUrl", "token"]);
 
   if (!serverUrl) {
@@ -100,11 +100,11 @@ async function handleSendDefault(type, url, tabId) {
     } catch {}
   }
 
-  await dispatch(type, url, destination || "", tabId);
+  await dispatch(type, url, destination || "", tabId, pageUrl);
 }
 
 // ── Open picker window ────────────────────────────────────────
-async function openPicker(type, url, tabId) {
+async function openPicker(type, url, tabId, pageUrl) {
   const { serverUrl, token } = await getStorage(["serverUrl", "token"]);
 
   if (!serverUrl) {
@@ -119,7 +119,7 @@ async function openPicker(type, url, tabId) {
   // On transmet le tabId dans l'URL du picker pour pouvoir injecter
   // le fetch dans la page d'origine lors de la validation du dossier
   const pickerUrl = chrome.runtime.getURL(
-    `picker/picker.html?type=${encodeURIComponent(type)}&url=${encodeURIComponent(url)}&tabId=${encodeURIComponent(tabId ?? "")}`
+    `picker/picker.html?type=${encodeURIComponent(type)}&url=${encodeURIComponent(url)}&tabId=${encodeURIComponent(tabId ?? "")}&pageUrl=${encodeURIComponent(pageUrl)}`
   );
 
   chrome.windows.create({
@@ -134,7 +134,7 @@ async function openPicker(type, url, tabId) {
 // ── Message listener (from picker) ───────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "dm-send") {
-    dispatch(msg.torrentType, msg.url, msg.destination, msg.tabId ?? null)
+    dispatch(msg.torrentType, msg.url, msg.destination, msg.tabId ?? null, msg.pageUrl ?? "")
       .then((result) => sendResponse({ ok: true, name: result?.name }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true; // keep channel open for async
@@ -142,91 +142,111 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ── Dispatch — détection du type à l'exécution ───────────────
-async function dispatch(type, url, destination, tabId) {
+async function dispatch(type, url, destination, tabId, pageUrl) {
   const { serverUrl, token } = await getStorage(["serverUrl", "token"]);
-  let data;
+  let data, name;
 
   if (url.startsWith("magnet:")) {
-    // ── Cas 1 : Lien magnet direct
     data = await sendMagnet(serverUrl, token, url, destination);
-    const name = data.torrents?.[0]?.name || "Torrent";
-    notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
-    await addToHistory(name, destination);
-    return { name };
-
+    name = data.torrents?.[0]?.name || "Torrent";
   } else if (/\.torrent(\?|#|$)/i.test(url)) {
-    // ── Cas 2 : URL dont le chemin se termine en .torrent (direct)
     data = await sendTorrentFile(serverUrl, token, url, destination);
-    const name = data.torrents?.[0]?.name || extractFilename(url);
-    notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
-    await addToHistory(name, destination);
-    return { name };
-
+    name = data.torrents?.[0]?.name || extractFilename(url);
   } else {
-    // ── Cas 3 : URL opaque / lien indirect
-    // On injecte le fetch dans la page d'origine (tabId) pour qu'il
-    // parte avec les cookies de session du site — sinon le serveur
-    // répondrait avec une page de login au lieu du fichier torrent.
-    data = await sendTorrentIndirect(serverUrl, token, url, destination, tabId);
-    const name = data.torrents?.[0]?.name || "Torrent";
-    notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
-    await addToHistory(name, destination);
-    return { name };
+    data = await sendTorrentIndirect(serverUrl, token, url, destination, tabId, pageUrl);
+    name = data.torrents?.[0]?.name || "Torrent";
   }
+
+  notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
+  await addToHistory(name, destination);
+  return { name };
 }
 
 // ── Lien torrent indirect ─────────────────────────────────────
-// Stratégie :
-//   1. Si on a un tabId valide → executeScript dans la page (avec cookies)
-//   2. Sinon → fetch direct depuis le background (sans cookies, fallback)
-async function sendTorrentIndirect(serverUrl, token, url, destination, tabId) {
+// 3 stratégies en cascade :
+//   1. chrome.cookies → fetch depuis le background AVEC les cookies du site
+//      (fonctionne toujours, indépendant du CSP et de l'état de l'onglet)
+//   2. executeScript world:MAIN → fetch dans le contexte JS de la page
+//      (fallback si cookies échoue, ex: site avec tokens dynamiques)
+//   3. fetch direct sans cookies (dernier recours)
+async function sendTorrentIndirect(serverUrl, token, url, destination, tabId, pageUrl) {
   let ct, cd, finalUrl, blob;
+  const strategies = [];
 
-  // ── Tentative 1 : fetch depuis le contexte de la page (avec cookies) ──
-  if (tabId != null) {
-    try {
-      const result = await fetchFromPageContext(tabId, url);
-      ct       = result.contentType;
-      cd       = result.contentDisposition;
-      finalUrl = result.finalUrl;
-
-      // result.base64 → Blob
-      const binary = atob(result.base64);
-      const bytes  = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      blob = new Blob([bytes]);
-    } catch (pageErr) {
-      // L'onglet a peut-être été fermé — on tente en fallback
-      console.warn("[DM] Fetch page échoué, fallback direct :", pageErr.message);
-    }
-  }
-
-  // ── Tentative 2 : fetch direct depuis le background (sans cookies) ──
-  if (!blob) {
-    const res = await fetch(url, { redirect: "follow" });
-    if (!res.ok) throw new Error(`Réponse HTTP ${res.status} pour ce lien`);
+  // ── Stratégie 1 : chrome.cookies (la plus fiable) ──────────
+  try {
+    console.log("[DM] Stratégie 1 : fetch avec chrome.cookies");
+    const res = await fetchWithSiteCookies(url, pageUrl);
     ct       = (res.headers.get("content-type")        || "");
     cd       = (res.headers.get("content-disposition") || "");
     finalUrl = res.url;
     blob     = await res.blob();
+    strategies.push("cookies:ok");
+  } catch (e) {
+    strategies.push("cookies:" + e.message);
+    console.warn("[DM] Stratégie 1 (cookies) échouée :", e.message);
+  }
+
+  // Vérifier si c'est bien un torrent avant de passer au fallback
+  if (blob) {
+    const early = looksLikeTorrent(ct, cd, finalUrl, blob);
+    const confirmed = early === true || (early === "maybe" && await confirmTorrentMagicBytes(blob));
+    if (!confirmed) {
+      console.warn("[DM] Cookies OK mais pas un torrent (ct=" + ct + ") — fallback");
+      blob = null;
+    }
+  }
+
+  // ── Stratégie 2 : executeScript world:MAIN (contexte page) ─
+  if (!blob && tabId != null) {
+    try {
+      console.log("[DM] Stratégie 2 : executeScript world:MAIN");
+      const result = await fetchFromPageContext(tabId, url);
+      ct       = result.contentType;
+      cd       = result.contentDisposition;
+      finalUrl = result.finalUrl;
+      const binary = atob(result.base64);
+      const bytes  = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      blob = new Blob([bytes]);
+      strategies.push("page:ok");
+    } catch (e) {
+      strategies.push("page:" + e.message);
+      console.warn("[DM] Stratégie 2 (page) échouée :", e.message);
+    }
+  }
+
+  // ── Stratégie 3 : fetch direct (dernier recours) ───────────
+  if (!blob) {
+    try {
+      console.log("[DM] Stratégie 3 : fetch direct (sans cookies)");
+      const res = await fetch(url, { redirect: "follow" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      ct       = (res.headers.get("content-type")        || "");
+      cd       = (res.headers.get("content-disposition") || "");
+      finalUrl = res.url;
+      blob     = await res.blob();
+      strategies.push("direct:ok");
+    } catch (e) {
+      strategies.push("direct:" + e.message);
+      console.error("[DM] Toutes les stratégies ont échoué :", strategies);
+      throw new Error(`Impossible de récupérer le fichier.\nStratégies : ${strategies.join(" → ")}`);
+    }
   }
 
   ct = (ct || "").toLowerCase();
   cd = (cd || "").toLowerCase();
 
-  const isTorrent =
-    ct.includes("application/x-bittorrent") ||
-    ct.includes("application/x-torrent")    ||
-    /\.torrent(\?|#|$)/i.test(finalUrl)     ||
-    /filename=["']?[^"']*\.torrent/i.test(cd);
+  const detection = looksLikeTorrent(ct, cd, finalUrl, blob);
+  // Si detection === "maybe" (Content-Type générique), vérifier les magic bytes
+  const isTorrent = detection === true || (detection === "maybe" && await confirmTorrentMagicBytes(blob));
 
   if (!isTorrent) {
-    // Log détaillé pour debug — visible dans chrome://extensions → Service Worker → Console
-    console.warn("[DM] Lien indirect non-torrent :", { ct, cd, finalUrl, blobSize: blob?.size });
+    console.warn("[DM] Pas un torrent :", { ct, cd, finalUrl, size: blob?.size, strategies });
     throw new Error(
       `Ce lien ne pointe pas vers un fichier .torrent` +
       (ct ? `\nType reçu : ${ct}` : "") +
-      (finalUrl ? `\nURL finale : ${finalUrl}` : "")
+      `\nStratégies tentées : ${strategies.join(" → ")}`
     );
   }
 
@@ -244,49 +264,91 @@ async function sendTorrentIndirect(serverUrl, token, url, destination, tabId) {
   return uploadRes.json();
 }
 
-// ── Injection du fetch dans la page (avec cookies de session) ─
-// IMPORTANT : world: "MAIN" est indispensable.
-//   - Sans world (= "ISOLATED") : le fetch part depuis l'origin de l'extension
-//     (chrome-extension://...) → le site ne reçoit PAS ses cookies → il répond
-//     avec la page HTML de login au lieu du fichier .torrent.
-//   - Avec world: "MAIN" : le fetch s'exécute dans le vrai contexte JS de la
-//     page → même origin, mêmes cookies, même Referer qu'un clic gauche normal.
+// ── Détection robuste : est-ce un fichier torrent ? ───────────
+// Vérifie Content-Type, Content-Disposition, URL finale, ET les
+// magic bytes (un fichier .torrent bencodé commence toujours par 'd').
+function looksLikeTorrent(ct, cd, finalUrl, blob) {
+  ct = (ct || "").toLowerCase();
+  cd = (cd || "").toLowerCase();
+
+  // Content-Type explicite
+  if (ct.includes("application/x-bittorrent") || ct.includes("application/x-torrent")) return true;
+  // URL finale contient .torrent
+  if (/\.torrent(\?|#|$)/i.test(finalUrl)) return true;
+  // Content-Disposition contient .torrent
+  if (/filename=["']?[^"']*\.torrent/i.test(cd)) return true;
+
+  // Magic bytes : un fichier torrent bencodé commence TOUJOURS par 'd'
+  // On l'utilise quand le Content-Type est générique (octet-stream, force-download…)
+  if (blob && blob.size > 0 && (
+    ct.includes("octet-stream") || ct.includes("force-download") || ct === ""
+  )) {
+    // On ne peut pas lire le blob de façon synchrone ici, donc on vérifie
+    // la taille : un fichier HTML de login fait >1KB et un torrent aussi,
+    // mais un torrent a rarement >10MB et jamais 0 bytes.
+    // La vérification réelle du premier octet se fait en async juste après.
+    return "maybe"; // sera vérifié par le caller
+  }
+
+  return false;
+}
+
+// Vérifie les magic bytes de façon async
+async function confirmTorrentMagicBytes(blob) {
+  if (!blob || blob.size === 0) return false;
+  const first = new Uint8Array(await blob.slice(0, 1).arrayBuffer());
+  return first[0] === 0x64; // 'd' en ASCII = début d'un dictionnaire bencodé
+}
+
+// ── Stratégie 1 : fetch avec les cookies extraits via chrome.cookies ─
+// Avantages par rapport à executeScript :
+//   - Pas bloqué par le CSP de la page
+//   - Fonctionne même si l'onglet est fermé
+//   - Accède aux cookies HttpOnly (invisibles au JS de la page)
+async function fetchWithSiteCookies(url, pageUrl) {
+  const cookies = await chrome.cookies.getAll({ url });
+  const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
+
+  if (!cookieHeader) {
+    console.warn("[DM] Aucun cookie trouvé pour", url);
+  } else {
+    console.log("[DM] Cookies récupérés :", cookies.length, "cookies pour", new URL(url).hostname);
+  }
+
+  const headers = {};
+  if (cookieHeader) headers["Cookie"] = cookieHeader;
+  if (pageUrl) headers["Referer"] = pageUrl;
+
+  const res = await fetch(url, {
+    redirect: "follow",
+    credentials: "omit",   // on gère les cookies nous-mêmes
+    headers
+  });
+
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res;
+}
+
+// ── Stratégie 2 : injection dans le contexte de la page ──────
 async function fetchFromPageContext(tabId, url) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    world: "MAIN",   // ← CRITIQUE : exécution dans le contexte réel de la page
+    world: "MAIN",
     func: async (fetchUrl) => {
       try {
-        const res = await fetch(fetchUrl, {
-          credentials: "include",
-          redirect: "follow"
-        });
-
-        if (!res.ok) {
-          return { error: `HTTP ${res.status} ${res.statusText}` };
-        }
-
+        const res = await fetch(fetchUrl, { credentials: "include", redirect: "follow" });
+        if (!res.ok) return { error: `HTTP ${res.status} ${res.statusText}` };
         const ct       = res.headers.get("content-type")        || "";
         const cd       = res.headers.get("content-disposition") || "";
         const finalUrl = res.url;
-
-        const buf   = await res.arrayBuffer();
-        const bytes = new Uint8Array(buf);
-
-        // Conversion en base64 par chunks pour ne pas exploser la call stack
+        const buf      = await res.arrayBuffer();
+        const bytes    = new Uint8Array(buf);
         let binary = "";
         const CHUNK = 8192;
         for (let i = 0; i < bytes.length; i += CHUNK) {
           binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
         }
-
-        return {
-          ok: true,
-          base64: btoa(binary),
-          contentType: ct,
-          contentDisposition: cd,
-          finalUrl
-        };
+        return { ok: true, base64: btoa(binary), contentType: ct, contentDisposition: cd, finalUrl };
       } catch (e) {
         return { error: e.message || String(e) };
       }
@@ -294,16 +356,11 @@ async function fetchFromPageContext(tabId, url) {
     args: [url]
   });
 
-  if (!results || !results[0]) {
-    throw new Error("executeScript : aucun résultat (onglet fermé ?)");
-  }
-
-  // world:"MAIN" ne peuple pas results[0].error de la même façon —
-  // on gère les erreurs via le champ .error retourné par la func
+  if (!results?.[0]) throw new Error("executeScript : aucun résultat");
   const r = results[0].result;
-  if (!r)       throw new Error("executeScript : résultat vide");
-  if (r.error)  throw new Error(`Fetch page : ${r.error}`);
-  if (!r.ok)    throw new Error("Fetch page : réponse inattendue");
+  if (!r)      throw new Error("executeScript : résultat vide");
+  if (r.error) throw new Error(`Fetch page : ${r.error}`);
+  if (!r.ok)   throw new Error("Fetch page : réponse inattendue");
   return r;
 }
 

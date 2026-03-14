@@ -8,7 +8,8 @@
     "storage",
     "notifications",
     "windows",
-    "scripting"
+    "scripting",
+    "cookies"
   ],
   "host_permissions": [
     "http://*/*",
