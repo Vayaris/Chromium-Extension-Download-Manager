@@ -371,5 +371,30 @@ input::placeholder { color: #2e3347; }
 }
 .logged-as { font-size: 12px; color: var(--text-dim); }
 
+/* ── Toggle row ──────────────────────────────────────────────── */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  text-transform: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.toggle-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.toggle-label { font-size: 12px; }
+.toggle-desc {
+  font-size: 11px;
+  color: var(--text-xs);
+  margin-top: 3px;
+  line-height: 1.4;
+}
+
 /* ── Connected panel ─────────────────────────────────────────── */
 #connectedPanel { display: flex; flex-direction: column; }

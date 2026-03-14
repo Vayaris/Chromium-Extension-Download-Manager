@@ -39,6 +39,7 @@ const el = {
   confirmDestBtn:   $("confirmDestBtn"),
   historySection:   $("historySection"),
   historyList:      $("historyList"),
+  interceptToggle:  $("interceptToggle"),
   loggedAs:         $("loggedAs"),
   logoutBtn:        $("logoutBtn"),
 };
@@ -61,11 +62,17 @@ let state = {
 document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
-  const stored = await storage.get(["serverUrl", "token", "username", "destination", "allowedPaths"]);
+  const stored = await storage.get(["serverUrl", "token", "username", "destination", "allowedPaths", "interceptDownloads"]);
   Object.assign(state, stored);
 
   if (stored.serverUrl) el.serverUrl.value = stored.serverUrl;
   if (stored.username)  el.username.value  = stored.username;
+
+  // Toggle interception (activé par défaut si non défini)
+  el.interceptToggle.checked = stored.interceptDownloads !== false;
+  el.interceptToggle.addEventListener("change", () => {
+    storage.set({ interceptDownloads: el.interceptToggle.checked });
+  });
 
   // Alerte HTTP visible dès l'init si l'URL déjà stockée est HTTP non-locale
   updateHttpWarning(el.serverUrl.value);

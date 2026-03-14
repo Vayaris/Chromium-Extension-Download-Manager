@@ -9,7 +9,8 @@
     "notifications",
     "windows",
     "scripting",
-    "cookies"
+    "cookies",
+    "downloads"
   ],
   "host_permissions": [
     "http://*/*",
@@ -34,6 +35,21 @@
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'self';"
   },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content-bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content-main.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
   "web_accessible_resources": [
     {
       "resources": ["picker/picker.html", "icons/*.png"],

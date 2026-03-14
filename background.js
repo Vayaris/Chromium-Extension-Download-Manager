@@ -131,15 +131,112 @@ async function openPicker(type, url, tabId, pageUrl) {
   });
 }
 
-// ── Message listener (from picker) ───────────────────────────
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+// ── Flag anti-doublon pour l'interception ─────────────────────
+// Quand le content script détecte un torrent, il envoie immédiatement
+// "torrent-will-send" AVANT de lire les données. Ce flag est activé
+// pour que onCreated sache qu'il doit juste annuler le download
+// sans re-fetch (le content script s'en charge déjà).
+let _contentScriptHandling = false;
+let _contentScriptTimer = null;
+
+// ── Pending refetch promises (for download interception) ──────
+const _pendingRefetches = {};
+
+// ── Message listener ─────────────────────────────────────────
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Picker demande d'envoyer un torrent
   if (msg.type === "dm-send") {
     dispatch(msg.torrentType, msg.url, msg.destination, msg.tabId ?? null, msg.pageUrl ?? "")
       .then((result) => sendResponse({ ok: true, name: result?.name }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
-    return true; // keep channel open for async
+    return true;
+  }
+
+  // Notification immédiate : le content script va envoyer un torrent
+  if (msg.action === "torrent-will-send") {
+    _contentScriptHandling = true;
+    clearTimeout(_contentScriptTimer);
+    // Reset après 30s au cas où le message "intercepted" n'arrive jamais
+    _contentScriptTimer = setTimeout(() => { _contentScriptHandling = false; }, 30000);
+  }
+
+  // Content script (MAIN world) a intercepté un .torrent via fetch/XHR
+  if (msg.action === "torrent-intercepted") {
+    _contentScriptHandling = false;
+    clearTimeout(_contentScriptTimer);
+    handleInterceptedTorrent(msg, sender);
+  }
+
+  // Résultat d'un re-fetch demandé au content script
+  if (msg.action === "refetch-result") {
+    const cb = _pendingRefetches[msg.id];
+    if (cb) {
+      cb(msg);
+      delete _pendingRefetches[msg.id];
+    }
   }
 });
+
+// ── Traitement d'un torrent intercepté par le content script ──
+async function handleInterceptedTorrent(msg, sender) {
+  const { serverUrl, token, interceptDownloads } = await getStorage(["serverUrl", "token", "interceptDownloads"]);
+  if (!serverUrl || !token || interceptDownloads === false) return;
+
+  const { destination } = await getStorage(["destination"]);
+
+  try {
+    // Convertir base64 → blob
+    const binary = atob(msg.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    // Vérifier magic byte (torrent bencodé commence par 'd')
+    if (bytes[0] !== 0x64) {
+      console.log("[DM] Intercepté mais pas un torrent (premier octet:", bytes[0], ")");
+      return;
+    }
+
+    const blob = new Blob([bytes], { type: "application/x-bittorrent" });
+    const filename = msg.filename || "download.torrent";
+
+    const formData = new FormData();
+    formData.append("file", blob, filename);
+    if (destination) formData.append("destination", destination);
+
+    const headers = { "Authorization": `Bearer ${token}` };
+    const res = await fetch(`${serverUrl}/api/torrents/upload`, {
+      method: "POST", headers, body: formData
+    });
+    await checkRes(res);
+    const data = await res.json();
+    const name = data.torrents?.[0]?.name || filename;
+    console.log("[DM] Torrent envoyé avec succès :", name);
+    notify("success", "Torrent envoyé !", `"${name}" ajouté à Download Manager.`);
+    await addToHistory(name, destination || "");
+  } catch (err) {
+    console.error("[DM] Erreur upload torrent intercepté :", err);
+    notify("error", "Erreur d'envoi", err.message || String(err));
+  }
+}
+
+// ── Re-fetch via content script (dans le contexte de la page) ──
+function refetchViaContentScript(tabId, url) {
+  const id = Math.random().toString(36).slice(2);
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      delete _pendingRefetches[id];
+      reject(new Error("Timeout re-fetch (15s)"));
+    }, 15000);
+
+    _pendingRefetches[id] = (result) => {
+      clearTimeout(timeout);
+      if (result.success) resolve(result);
+      else reject(new Error(result.error || "Re-fetch échoué"));
+    };
+
+    chrome.tabs.sendMessage(tabId, { action: "do-refetch", url, id });
+  });
+}
 
 // ── Dispatch — détection du type à l'exécution ───────────────
 async function dispatch(type, url, destination, tabId, pageUrl) {
@@ -441,11 +538,17 @@ async function addToHistory(name, destination) {
 
 // ── Notification helper ───────────────────────────────────────
 function notify(type, title, message) {
-  chrome.notifications.create({
+  const id = "dm-" + Date.now();
+  chrome.notifications.create(id, {
     type: "basic",
-    iconUrl: type === "success" ? "icons/icon48.png" : "icons/icon48.png",
-    title,
-    message
+    iconUrl: "icons/icon48.png",
+    title: title || "Download Manager",
+    message: message || "",
+    priority: 2
+  }, () => {
+    if (chrome.runtime.lastError) {
+      console.warn("[DM] Notification échouée :", chrome.runtime.lastError.message);
+    }
   });
 }
 
@@ -459,3 +562,112 @@ function extractFilename(url) {
     return "upload.torrent";
   }
 }
+
+// ── Interception des téléchargements .torrent ──────────────────
+// Filet de sécurité : si le content script (MAIN world) n'a pas
+// intercepté le fetch (ex: download déclenché par window.location),
+// on l'attrape ici via chrome.downloads.onCreated et on re-fetch
+// via le content script (qui a les cookies de la page).
+chrome.downloads.onCreated.addListener(async (item) => {
+  const mime = (item.mime || "").toLowerCase();
+  const url  = item.finalUrl || item.url || "";
+
+  // Détecter si c'est un fichier torrent
+  const isTorrent =
+    mime.includes("x-bittorrent") ||
+    mime.includes("x-torrent") ||
+    /\.torrent(\?|#|$)/i.test(url);
+
+  if (!isTorrent) return;
+
+  // Vérifier que l'extension est configurée et connectée
+  const { serverUrl, token, interceptDownloads } = await getStorage(["serverUrl", "token", "interceptDownloads"]);
+  if (!serverUrl || !token) return;
+  if (interceptDownloads === false) return;
+
+  // Le content script gère déjà ce torrent ? → juste annuler le download Chrome
+  if (_contentScriptHandling || url.startsWith("blob:")) {
+    console.log("[DM] Torrent déjà géré par content script, annulation du download...");
+    try { await chrome.downloads.cancel(item.id); } catch {}
+    try { await chrome.downloads.erase({ id: item.id }); } catch {}
+    return;
+  }
+
+  // Annuler le téléchargement navigateur
+  try { await chrome.downloads.cancel(item.id); } catch {}
+  try { await chrome.downloads.erase({ id: item.id }); } catch {}
+
+  const { destination } = await getStorage(["destination"]);
+
+  // Trouver l'onglet actif pour re-fetch via content script
+  let tabId = null;
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    tabId = activeTab?.id;
+  } catch {}
+
+  // ── Stratégie A : re-fetch via content script (page context + cookies) ──
+  if (tabId) {
+    try {
+      console.log("[DM] Re-fetch via content script (tab", tabId, ")...");
+      const result = await refetchViaContentScript(tabId, url);
+
+      const binary = atob(result.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+      // Vérifier magic byte
+      if (bytes[0] !== 0x64) throw new Error("Pas un fichier torrent (magic byte)");
+
+      const blob = new Blob([bytes], { type: "application/x-bittorrent" });
+      const filename = result.filename || "download.torrent";
+
+      const formData = new FormData();
+      formData.append("file", blob, filename);
+      if (destination) formData.append("destination", destination);
+
+      const headers = { "Authorization": `Bearer ${token}` };
+      const uploadRes = await fetch(`${serverUrl}/api/torrents/upload`, {
+        method: "POST", headers, body: formData
+      });
+      await checkRes(uploadRes);
+      const data = await uploadRes.json();
+      const name = data.torrents?.[0]?.name || filename;
+      notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
+      await addToHistory(name, destination || "");
+      return;
+    } catch (err) {
+      console.warn("[DM] Re-fetch via content script échoué :", err.message);
+    }
+  }
+
+  // ── Stratégie B : fetch direct avec chrome.cookies (fallback) ──
+  try {
+    console.log("[DM] Fallback: fetch avec chrome.cookies...");
+    const res = await fetchWithSiteCookies(url, item.referrer || "");
+    const blob = await res.blob();
+
+    // Vérifier magic byte
+    const first = new Uint8Array(await blob.slice(0, 1).arrayBuffer());
+    if (first[0] !== 0x64) throw new Error("Pas un fichier torrent");
+
+    const cd = (res.headers.get("content-disposition") || "").toLowerCase();
+    const filename = extractFilenameFromHeaders(cd, res.url || url);
+
+    const formData = new FormData();
+    formData.append("file", blob, filename);
+    if (destination) formData.append("destination", destination);
+
+    const headers = { "Authorization": `Bearer ${token}` };
+    const uploadRes = await fetch(`${serverUrl}/api/torrents/upload`, {
+      method: "POST", headers, body: formData
+    });
+    await checkRes(uploadRes);
+    const data = await uploadRes.json();
+    const name = data.torrents?.[0]?.name || filename;
+    notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
+    await addToHistory(name, destination || "");
+  } catch (err) {
+    notify("error", "Erreur d'interception", err.message);
+  }
+});
