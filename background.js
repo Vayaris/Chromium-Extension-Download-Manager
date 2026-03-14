@@ -23,14 +23,19 @@ function setStorage(obj) {
 }
 
 // ── Context menus ─────────────────────────────────────────────
+// targetUrlPatterns inclut *://*/* pour couvrir les liens "torrent indirect" :
+// boutons dont l'URL opaque (ex: /download/12345) redirige vers un .torrent
+// côté serveur via Content-Disposition. La détection du type est faite à
+// l'exécution (runtime) dans dispatch().
+const TORRENT_PATTERNS = ["magnet:*", "*://*/*.torrent", "*://*/*.torrent?*", "*://*/*"];
+
 function buildMenus() {
   chrome.contextMenus.removeAll(() => {
-    // Parent entry (for sub-menus on links)
     chrome.contextMenus.create({
       id: "dm-parent",
       title: "Download Manager",
       contexts: ["link"],
-      targetUrlPatterns: ["magnet:*", "*://*/*.torrent", "*://*/*.torrent?*"]
+      targetUrlPatterns: TORRENT_PATTERNS
     });
 
     chrome.contextMenus.create({
@@ -38,7 +43,7 @@ function buildMenus() {
       parentId: "dm-parent",
       title: "Envoyer (dossier par défaut)",
       contexts: ["link"],
-      targetUrlPatterns: ["magnet:*", "*://*/*.torrent", "*://*/*.torrent?*"]
+      targetUrlPatterns: TORRENT_PATTERNS
     });
 
     chrome.contextMenus.create({
@@ -46,7 +51,7 @@ function buildMenus() {
       parentId: "dm-parent",
       title: "Envoyer… (choisir le dossier)",
       contexts: ["link"],
-      targetUrlPatterns: ["magnet:*", "*://*/*.torrent", "*://*/*.torrent?*"]
+      targetUrlPatterns: TORRENT_PATTERNS
     });
   });
 }
@@ -59,6 +64,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   const url = info.linkUrl;
   if (!url) return;
 
+  // type est une indication initiale ; dispatch() affine si le lien est indirect
   const type = url.startsWith("magnet:") ? "magnet" : "torrent";
 
   if (info.menuItemId === "dm-send-default") {
@@ -130,23 +136,90 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
-// ── Dispatch (magnet or .torrent) ────────────────────────────
+// ── Dispatch — détection du type à l'exécution ───────────────
 async function dispatch(type, url, destination) {
   const { serverUrl, token } = await getStorage(["serverUrl", "token"]);
+  let data;
 
-  if (type === "magnet") {
-    const data = await sendMagnet(serverUrl, token, url, destination);
+  if (url.startsWith("magnet:")) {
+    // ── Cas 1 : Lien magnet direct
+    data = await sendMagnet(serverUrl, token, url, destination);
     const name = data.torrents?.[0]?.name || "Torrent";
     notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
     await addToHistory(name, destination);
     return { name };
-  } else {
-    const data = await sendTorrentFile(serverUrl, token, url, destination);
+
+  } else if (/\.torrent(\?|#|$)/i.test(url)) {
+    // ── Cas 2 : URL dont le chemin se termine en .torrent (direct)
+    data = await sendTorrentFile(serverUrl, token, url, destination);
     const name = data.torrents?.[0]?.name || extractFilename(url);
     notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
     await addToHistory(name, destination);
     return { name };
+
+  } else {
+    // ── Cas 3 : URL opaque / lien indirect — détecter via les headers HTTP
+    data = await sendTorrentIndirect(serverUrl, token, url, destination);
+    const name = data.torrents?.[0]?.name || "Torrent";
+    notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
+    await addToHistory(name, destination);
+    return { name };
   }
+}
+
+// ── Lien torrent indirect : fetch + détection headers + upload ─
+// Couvre les boutons dont l'URL (/download/123) redirige vers un
+// fichier .torrent via Content-Disposition ou Content-Type côté serveur.
+async function sendTorrentIndirect(serverUrl, token, url, destination) {
+  const res = await fetch(url, { redirect: "follow" });
+
+  if (!res.ok) {
+    throw new Error(`Réponse HTTP ${res.status} pour ce lien`);
+  }
+
+  const ct       = (res.headers.get("content-type")        || "").toLowerCase();
+  const cd       = (res.headers.get("content-disposition") || "").toLowerCase();
+  const finalUrl = res.url;
+
+  const isTorrent =
+    ct.includes("application/x-bittorrent") ||
+    ct.includes("application/x-torrent")    ||
+    /\.torrent(\?|#|$)/i.test(finalUrl)     ||
+    /filename=["']?[^"']*\.torrent/i.test(cd);
+
+  if (!isTorrent) {
+    throw new Error(
+      `Ce lien ne pointe pas vers un fichier .torrent` +
+      (ct ? ` (type reçu : ${ct})` : "")
+    );
+  }
+
+  // Body disponible en une seule requête — pas de double fetch
+  const blob     = await res.blob();
+  const filename = extractFilenameFromHeaders(cd, finalUrl);
+
+  const formData = new FormData();
+  formData.append("file", blob, filename);
+  if (destination) formData.append("destination", destination);
+
+  const headers = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const uploadRes = await fetch(`${serverUrl}/api/torrents/upload`, {
+    method: "POST", headers, body: formData
+  });
+  await checkRes(uploadRes);
+  return uploadRes.json();
+}
+
+// Extrait le nom de fichier depuis Content-Disposition en priorité,
+// puis fallback sur l'URL finale.
+function extractFilenameFromHeaders(contentDisposition, finalUrl) {
+  // Supporte : filename="film.torrent" et filename*=UTF-8''film.torrent
+  const match = contentDisposition.match(/filename\*?=["']?(?:utf-8'')?([^"';\s]+)/i);
+  if (match && match[1]) {
+    try { return decodeURIComponent(match[1]); } catch { return match[1]; }
+  }
+  return extractFilename(finalUrl);
 }
 
 // ── API calls ─────────────────────────────────────────────────
