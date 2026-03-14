@@ -6,6 +6,7 @@
 let state = {
   torrentType: "",   // "magnet" | "torrent"
   url: "",
+  tabId: null,       // id de l'onglet d'origine (pour fetch avec cookies)
   currentPath: "",
   selectedPath: "",
   serverUrl: "",
@@ -36,7 +37,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Parse query params
   const params = new URLSearchParams(location.search);
   state.torrentType = params.get("type") || "magnet";
-  state.url = params.get("url") || "";
+  state.url         = params.get("url")  || "";
+  // tabId transmis depuis le background pour le fetch avec cookies
+  const rawTabId    = parseInt(params.get("tabId") || "", 10);
+  state.tabId       = isNaN(rawTabId) ? null : rawTabId;
 
   // Load stored config
   const stored = await storage.get(["serverUrl", "token", "destination", "allowedPaths"]);
@@ -179,7 +183,8 @@ async function sendNow() {
         type: "dm-send",
         torrentType: state.torrentType,
         url: state.url,
-        destination: state.selectedPath
+        destination: state.selectedPath,
+        tabId: state.tabId   // permet au background d'injecter le fetch avec cookies
       }, (response) => {
         if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
         if (response && response.ok) resolve(response);

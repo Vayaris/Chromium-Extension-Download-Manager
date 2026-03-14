@@ -60,22 +60,25 @@ chrome.runtime.onInstalled.addListener(buildMenus);
 chrome.runtime.onStartup.addListener(buildMenus);
 
 // ── Context menu click handler ────────────────────────────────
-chrome.contextMenus.onClicked.addListener(async (info) => {
-  const url = info.linkUrl;
+// Le second paramètre `tab` contient l'id de l'onglet où l'utilisateur
+// a fait le clic droit — on en a besoin pour injecter le fetch dans la page.
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  const url   = info.linkUrl;
+  const tabId = tab?.id ?? null;
   if (!url) return;
 
   // type est une indication initiale ; dispatch() affine si le lien est indirect
   const type = url.startsWith("magnet:") ? "magnet" : "torrent";
 
   if (info.menuItemId === "dm-send-default") {
-    await handleSendDefault(type, url);
+    await handleSendDefault(type, url, tabId);
   } else if (info.menuItemId === "dm-send-pick") {
-    await openPicker(type, url);
+    await openPicker(type, url, tabId);
   }
 });
 
 // ── Send to default destination ───────────────────────────────
-async function handleSendDefault(type, url) {
+async function handleSendDefault(type, url, tabId) {
   const { serverUrl, token } = await getStorage(["serverUrl", "token"]);
 
   if (!serverUrl) {
@@ -97,11 +100,11 @@ async function handleSendDefault(type, url) {
     } catch {}
   }
 
-  await dispatch(type, url, destination || "");
+  await dispatch(type, url, destination || "", tabId);
 }
 
 // ── Open picker window ────────────────────────────────────────
-async function openPicker(type, url) {
+async function openPicker(type, url, tabId) {
   const { serverUrl, token } = await getStorage(["serverUrl", "token"]);
 
   if (!serverUrl) {
@@ -113,8 +116,10 @@ async function openPicker(type, url) {
     return;
   }
 
+  // On transmet le tabId dans l'URL du picker pour pouvoir injecter
+  // le fetch dans la page d'origine lors de la validation du dossier
   const pickerUrl = chrome.runtime.getURL(
-    `picker/picker.html?type=${encodeURIComponent(type)}&url=${encodeURIComponent(url)}`
+    `picker/picker.html?type=${encodeURIComponent(type)}&url=${encodeURIComponent(url)}&tabId=${encodeURIComponent(tabId ?? "")}`
   );
 
   chrome.windows.create({
@@ -129,7 +134,7 @@ async function openPicker(type, url) {
 // ── Message listener (from picker) ───────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "dm-send") {
-    dispatch(msg.torrentType, msg.url, msg.destination)
+    dispatch(msg.torrentType, msg.url, msg.destination, msg.tabId ?? null)
       .then((result) => sendResponse({ ok: true, name: result?.name }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true; // keep channel open for async
@@ -137,7 +142,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ── Dispatch — détection du type à l'exécution ───────────────
-async function dispatch(type, url, destination) {
+async function dispatch(type, url, destination, tabId) {
   const { serverUrl, token } = await getStorage(["serverUrl", "token"]);
   let data;
 
@@ -158,8 +163,11 @@ async function dispatch(type, url, destination) {
     return { name };
 
   } else {
-    // ── Cas 3 : URL opaque / lien indirect — détecter via les headers HTTP
-    data = await sendTorrentIndirect(serverUrl, token, url, destination);
+    // ── Cas 3 : URL opaque / lien indirect
+    // On injecte le fetch dans la page d'origine (tabId) pour qu'il
+    // parte avec les cookies de session du site — sinon le serveur
+    // répondrait avec une page de login au lieu du fichier torrent.
+    data = await sendTorrentIndirect(serverUrl, token, url, destination, tabId);
     const name = data.torrents?.[0]?.name || "Torrent";
     notify("success", "Envoyé !", `"${name}" ajouté à Download Manager.`);
     await addToHistory(name, destination);
@@ -167,19 +175,43 @@ async function dispatch(type, url, destination) {
   }
 }
 
-// ── Lien torrent indirect : fetch + détection headers + upload ─
-// Couvre les boutons dont l'URL (/download/123) redirige vers un
-// fichier .torrent via Content-Disposition ou Content-Type côté serveur.
-async function sendTorrentIndirect(serverUrl, token, url, destination) {
-  const res = await fetch(url, { redirect: "follow" });
+// ── Lien torrent indirect ─────────────────────────────────────
+// Stratégie :
+//   1. Si on a un tabId valide → executeScript dans la page (avec cookies)
+//   2. Sinon → fetch direct depuis le background (sans cookies, fallback)
+async function sendTorrentIndirect(serverUrl, token, url, destination, tabId) {
+  let ct, cd, finalUrl, blob;
 
-  if (!res.ok) {
-    throw new Error(`Réponse HTTP ${res.status} pour ce lien`);
+  // ── Tentative 1 : fetch depuis le contexte de la page (avec cookies) ──
+  if (tabId != null) {
+    try {
+      const result = await fetchFromPageContext(tabId, url);
+      ct       = result.contentType;
+      cd       = result.contentDisposition;
+      finalUrl = result.finalUrl;
+
+      // result.base64 → Blob
+      const binary = atob(result.base64);
+      const bytes  = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      blob = new Blob([bytes]);
+    } catch (_) {
+      // L'onglet a peut-être été fermé ou naviguait — on tente en fallback
+    }
   }
 
-  const ct       = (res.headers.get("content-type")        || "").toLowerCase();
-  const cd       = (res.headers.get("content-disposition") || "").toLowerCase();
-  const finalUrl = res.url;
+  // ── Tentative 2 : fetch direct depuis le background (sans cookies) ──
+  if (!blob) {
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) throw new Error(`Réponse HTTP ${res.status} pour ce lien`);
+    ct       = (res.headers.get("content-type")        || "");
+    cd       = (res.headers.get("content-disposition") || "");
+    finalUrl = res.url;
+    blob     = await res.blob();
+  }
+
+  ct = (ct || "").toLowerCase();
+  cd = (cd || "").toLowerCase();
 
   const isTorrent =
     ct.includes("application/x-bittorrent") ||
@@ -194,10 +226,7 @@ async function sendTorrentIndirect(serverUrl, token, url, destination) {
     );
   }
 
-  // Body disponible en une seule requête — pas de double fetch
-  const blob     = await res.blob();
   const filename = extractFilenameFromHeaders(cd, finalUrl);
-
   const formData = new FormData();
   formData.append("file", blob, filename);
   if (destination) formData.append("destination", destination);
@@ -209,6 +238,42 @@ async function sendTorrentIndirect(serverUrl, token, url, destination) {
   });
   await checkRes(uploadRes);
   return uploadRes.json();
+}
+
+// ── Injection du fetch dans la page (avec cookies de session) ─
+// Utilise chrome.scripting.executeScript pour exécuter le fetch
+// dans le contexte de l'onglet du site torrent, où les cookies sont
+// disponibles. Retourne { base64, contentType, contentDisposition, finalUrl }.
+async function fetchFromPageContext(tabId, url) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (fetchUrl) => {
+      // S'exécute dans le contexte de la page — les cookies du site sont inclus
+      const res = await fetch(fetchUrl, { credentials: "include", redirect: "follow" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const ct = res.headers.get("content-type")        || "";
+      const cd = res.headers.get("content-disposition") || "";
+      const finalUrl = res.url;
+
+      const buf   = await res.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+
+      // Conversion en base64 par chunks pour ne pas exploser la stack
+      let binary = "";
+      const CHUNK = 8192;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      }
+
+      return { base64: btoa(binary), contentType: ct, contentDisposition: cd, finalUrl };
+    },
+    args: [url]
+  });
+
+  if (!results || !results[0]) throw new Error("executeScript n'a retourné aucun résultat");
+  if (results[0].error)       throw new Error(results[0].error.message || "Erreur executeScript");
+  return results[0].result;
 }
 
 // Extrait le nom de fichier depuis Content-Disposition en priorité,
