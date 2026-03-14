@@ -195,8 +195,9 @@ async function sendTorrentIndirect(serverUrl, token, url, destination, tabId) {
       const bytes  = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
       blob = new Blob([bytes]);
-    } catch (_) {
-      // L'onglet a peut-être été fermé ou naviguait — on tente en fallback
+    } catch (pageErr) {
+      // L'onglet a peut-être été fermé — on tente en fallback
+      console.warn("[DM] Fetch page échoué, fallback direct :", pageErr.message);
     }
   }
 
@@ -220,9 +221,12 @@ async function sendTorrentIndirect(serverUrl, token, url, destination, tabId) {
     /filename=["']?[^"']*\.torrent/i.test(cd);
 
   if (!isTorrent) {
+    // Log détaillé pour debug — visible dans chrome://extensions → Service Worker → Console
+    console.warn("[DM] Lien indirect non-torrent :", { ct, cd, finalUrl, blobSize: blob?.size });
     throw new Error(
       `Ce lien ne pointe pas vers un fichier .torrent` +
-      (ct ? ` (type reçu : ${ct})` : "")
+      (ct ? `\nType reçu : ${ct}` : "") +
+      (finalUrl ? `\nURL finale : ${finalUrl}` : "")
     );
   }
 
@@ -241,39 +245,66 @@ async function sendTorrentIndirect(serverUrl, token, url, destination, tabId) {
 }
 
 // ── Injection du fetch dans la page (avec cookies de session) ─
-// Utilise chrome.scripting.executeScript pour exécuter le fetch
-// dans le contexte de l'onglet du site torrent, où les cookies sont
-// disponibles. Retourne { base64, contentType, contentDisposition, finalUrl }.
+// IMPORTANT : world: "MAIN" est indispensable.
+//   - Sans world (= "ISOLATED") : le fetch part depuis l'origin de l'extension
+//     (chrome-extension://...) → le site ne reçoit PAS ses cookies → il répond
+//     avec la page HTML de login au lieu du fichier .torrent.
+//   - Avec world: "MAIN" : le fetch s'exécute dans le vrai contexte JS de la
+//     page → même origin, mêmes cookies, même Referer qu'un clic gauche normal.
 async function fetchFromPageContext(tabId, url) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
+    world: "MAIN",   // ← CRITIQUE : exécution dans le contexte réel de la page
     func: async (fetchUrl) => {
-      // S'exécute dans le contexte de la page — les cookies du site sont inclus
-      const res = await fetch(fetchUrl, { credentials: "include", redirect: "follow" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      try {
+        const res = await fetch(fetchUrl, {
+          credentials: "include",
+          redirect: "follow"
+        });
 
-      const ct = res.headers.get("content-type")        || "";
-      const cd = res.headers.get("content-disposition") || "";
-      const finalUrl = res.url;
+        if (!res.ok) {
+          return { error: `HTTP ${res.status} ${res.statusText}` };
+        }
 
-      const buf   = await res.arrayBuffer();
-      const bytes = new Uint8Array(buf);
+        const ct       = res.headers.get("content-type")        || "";
+        const cd       = res.headers.get("content-disposition") || "";
+        const finalUrl = res.url;
 
-      // Conversion en base64 par chunks pour ne pas exploser la stack
-      let binary = "";
-      const CHUNK = 8192;
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+        const buf   = await res.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+
+        // Conversion en base64 par chunks pour ne pas exploser la call stack
+        let binary = "";
+        const CHUNK = 8192;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        }
+
+        return {
+          ok: true,
+          base64: btoa(binary),
+          contentType: ct,
+          contentDisposition: cd,
+          finalUrl
+        };
+      } catch (e) {
+        return { error: e.message || String(e) };
       }
-
-      return { base64: btoa(binary), contentType: ct, contentDisposition: cd, finalUrl };
     },
     args: [url]
   });
 
-  if (!results || !results[0]) throw new Error("executeScript n'a retourné aucun résultat");
-  if (results[0].error)       throw new Error(results[0].error.message || "Erreur executeScript");
-  return results[0].result;
+  if (!results || !results[0]) {
+    throw new Error("executeScript : aucun résultat (onglet fermé ?)");
+  }
+
+  // world:"MAIN" ne peuple pas results[0].error de la même façon —
+  // on gère les erreurs via le champ .error retourné par la func
+  const r = results[0].result;
+  if (!r)       throw new Error("executeScript : résultat vide");
+  if (r.error)  throw new Error(`Fetch page : ${r.error}`);
+  if (!r.ok)    throw new Error("Fetch page : réponse inattendue");
+  return r;
 }
 
 // Extrait le nom de fichier depuis Content-Disposition en priorité,
