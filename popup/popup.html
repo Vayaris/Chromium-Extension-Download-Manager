@@ -35,6 +35,12 @@
       <div class="field">
         <label for="serverUrl">URL du serveur</label>
         <input type="url" id="serverUrl" placeholder="http://192.168.1.100:40320" autocomplete="off" spellcheck="false" />
+        <div id="httpWarning" class="http-warning" style="display:none">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M10 3L2 17h16L10 3z"/><path d="M10 9v4M10 14.5v.5" stroke-linecap="round"/>
+          </svg>
+          Connexion non chiffrée (HTTP)
+        </div>
       </div>
       <div class="field">
         <label for="username">Identifiant</label>

@@ -69,6 +69,8 @@ function renderTorrentInfo() {
 
 // ── File browser ──────────────────────────────────────────────
 async function loadBrowser(path) {
+  // Défense en profondeur : rejette les chemins contenant des traversals
+  if (!path || path.includes("..")) return;
   clearError();
   el.folderList.textContent = "";
 
@@ -197,6 +199,11 @@ async function sendNow() {
 el.mkdirBtn.addEventListener("click", async () => {
   const name = prompt("Nom du nouveau dossier :");
   if (!name || !name.trim()) return;
+  // Rejette les noms contenant des séparateurs ou traversals
+  if (name.includes("/") || name.includes("\\") || name.includes("..")) {
+    showError("Nom de dossier invalide (caractères interdits : / \\ ..)");
+    return;
+  }
   clearError();
   try {
     const res = await apiFetch("/api/files/mkdir", {

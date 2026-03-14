@@ -319,6 +319,25 @@ input::placeholder { color: #2e3347; }
   text-align: center;
 }
 
+/* ── HTTP warning ────────────────────────────────────────────── */
+.http-warning {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #fcd34d;
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 11px;
+  margin-top: 4px;
+}
+.http-warning svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
 /* ── Error message ───────────────────────────────────────────── */
 .error-msg {
   display: none;

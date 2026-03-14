@@ -13,6 +13,7 @@ const el = {
   stepCredentials:  $("stepCredentials"),
   loginForm:        $("loginForm"),
   serverUrl:        $("serverUrl"),
+  httpWarning:      $("httpWarning"),
   username:         $("username"),
   password:         $("password"),
   loginBtn:         $("loginBtn"),
@@ -64,6 +65,10 @@ async function init() {
   Object.assign(state, stored);
 
   if (stored.serverUrl) el.serverUrl.value = stored.serverUrl;
+  if (stored.username)  el.username.value  = stored.username;
+
+  // Alerte HTTP visible dès l'init si l'URL déjà stockée est HTTP non-locale
+  updateHttpWarning(el.serverUrl.value);
 
   if (stored.token && stored.serverUrl) {
     await enterConnectedMode();
@@ -71,6 +76,31 @@ async function init() {
     setStatus("off", "Non connecté");
     showStep("credentials");
   }
+}
+
+// ── Auto-save : serverUrl + username sauvegardés dès la saisie ─
+// Cela garantit que les champs sont pré-remplis si l'utilisateur
+// ferme le popup pour aller chercher ses identifiants (ex: Bitwarden).
+let _saveTimer = null;
+function scheduleFormSave() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    const url  = el.serverUrl.value.trim().replace(/\/$/, "");
+    const user = el.username.value.trim();
+    if (url)  storage.set({ serverUrl: url });
+    if (user) storage.set({ username: user });
+  }, 400);
+}
+// Listeners rattachés après le chargement du DOM (el est déjà prêt)
+el.serverUrl.addEventListener("input", () => {
+  scheduleFormSave();
+  updateHttpWarning(el.serverUrl.value);
+});
+el.username.addEventListener("input", scheduleFormSave);
+
+function updateHttpWarning(val) {
+  const isLocalhost = /localhost|127\.0\.0\.1/.test(val);
+  el.httpWarning.style.display = (val.startsWith("http://") && !isLocalhost) ? "flex" : "none";
 }
 
 // ── Navigation entre les étapes ───────────────────────────────
@@ -91,7 +121,16 @@ el.loginForm.addEventListener("submit", async (e) => {
   const username  = el.username.value.trim();
   const password  = el.password.value;
 
-  if (!serverUrl)          return showError(el.loginError, "L'URL du serveur est requise.");
+  if (!serverUrl) return showError(el.loginError, "L'URL du serveur est requise.");
+  // Validation du protocole — rejette javascript:, data:, etc.
+  try {
+    const parsed = new URL(serverUrl);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return showError(el.loginError, "L'URL doit commencer par http:// ou https://");
+    }
+  } catch {
+    return showError(el.loginError, "URL invalide. Exemple : http://192.168.1.100:40320");
+  }
   if (!username || !password) return showError(el.loginError, "Identifiants requis.");
 
   el.loginBtn.disabled = true;
